@@ -56,7 +56,7 @@ def validate_gguf(path: str) -> Path:
     return file_path
 
 
-def generate(path: str, prompt: str, project: str = "") -> str:
+def generate(path: str, prompt: str, project: str = "", online: bool = False) -> str:
     """Load the model if needed and return its reply. Call this off the UI thread."""
     global _model, _loaded_path
     file_path = validate_gguf(path)
@@ -81,7 +81,7 @@ def generate(path: str, prompt: str, project: str = "") -> str:
             )
             _loaded_path = str(file_path)
         trace, cleared = latest_trace(str(file_path), extra_user=prompt)
-        reply = _complete(_model, trace, cleared, project)
+        reply = _complete(_model, trace, cleared, project, online)
         record_turn(str(file_path), "user", prompt)
         record_turn(str(file_path), "assistant", reply)
         return reply
@@ -118,7 +118,7 @@ def _spoken_reply(text: str) -> str:
 
 
 _LINE_TOOL = re.compile(
-    r"^TOOL\s+(list_dir|read_file|make_dir)\s+(.+?)\s*$",
+    r"^TOOL\s+(list_dir|read_file|make_dir|web_lookup)\s+(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _COPY_TOOL = re.compile(
@@ -169,11 +169,11 @@ def _unquote(path: str) -> str:
     return path.strip().strip('"').strip("'")
 
 
-def _system_prompt(project: str, cleared: bool) -> str:
+def _system_prompt(project: str, cleared: bool, online: bool = False) -> str:
     folder = project if project else "none — use Open Folder"
     text = (
         "You are Zira 1.0, the offline assistant inside VibeCoder, a local Windows text editor, daughter number 4. "
-        "This PC has no quantum hardware, no compiler farm, and no network while you run. "
+        "This PC has no quantum hardware and no compiler farm. "
         "Earlier talk of quantum systems, matrices, or self-replicating compilers was wrong. Do not continue it. "
         "Never invent files, folders, or features. If a tool has not returned it, you do not know it. "
         f"Open project: {folder}. "
@@ -191,13 +191,22 @@ def _system_prompt(project: str, cleared: bool) -> str:
         "When you answer the person, use plain English sentences and only facts from tool results. "
         "Do not use Chinese characters. Do not repeat a sentence. Do not narrate private reasoning."
     )
+    if online:
+        text += (
+            " ONLINE is on. For a public reference, reply with only TOOL web_lookup TOPIC. "
+            "That reads one public web page and saves a short note in your database. "
+            "Do not ask it to download a program or a private file. "
+            "Do not claim you looked online unless the tool result says so."
+        )
+    else:
+        text += " You are OFFLINE. Do not claim you looked anything up online."
     if cleared:
         text += " Older conversation is saved in the log and is not all in this prompt. Continue from the latest trace."
     return text
 
 
-def _complete(model, trace: list[dict[str, str]], cleared: bool, project: str) -> str:
-    messages: list[dict[str, str]] = [{"role": "system", "content": _system_prompt(project, cleared)}, *trace]
+def _complete(model, trace: list[dict[str, str]], cleared: bool, project: str, online: bool = False) -> str:
+    messages: list[dict[str, str]] = [{"role": "system", "content": _system_prompt(project, cleared, online)}, *trace]
     notes: list[str] = []
     corrected = False
     for _ in range(_MAX_TOOLS + 1):
@@ -224,7 +233,7 @@ def _complete(model, trace: list[dict[str, str]], cleared: bool, project: str) -
             if not notes and spoken and _INVENTED.search(spoken):
                 spoken = "No tool was used, so this is not a look at your files.\n\n" + spoken
             return _with_notes(notes, spoken)
-        result = run_tool(call, project)
+        result = run_tool(call, project, online=online)
         notes.append(_note(call, result))
         messages.append({"role": "assistant", "content": raw})
         messages.append(

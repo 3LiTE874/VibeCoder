@@ -8,6 +8,7 @@ reply continues from the latest trace that still fits.
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,10 +18,43 @@ REPLY_TOKENS = 512
 _SYSTEM_RESERVE = 480
 
 
-def database_path() -> Path:
-    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "VibeCoder"
+def app_folder() -> Path:
+    override = os.environ.get("VIBECODER_APPDATA", "").strip()
+    root = Path(override) if override else Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "VibeCoder"
     root.mkdir(parents=True, exist_ok=True)
-    return root / "zira_memory.sqlite"
+    return root
+
+
+def database_path() -> Path:
+    """SQLite file to copy when backing Zira up onto another PC."""
+    pointer = app_folder() / "database.path"
+    if pointer.is_file():
+        chosen = pointer.read_text(encoding="utf-8").strip()
+        if chosen:
+            path = Path(chosen)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+    return app_folder() / "zira_memory.sqlite"
+
+
+def choose_database_folder(folder: str) -> Path:
+    """Point Zira at a folder. Copy the current database if the new file is not there yet."""
+    dest_dir = Path(folder)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "zira_memory.sqlite"
+    current = database_path()
+    if current.is_file() and current.resolve() != dest.resolve() and not dest.exists():
+        shutil.copy2(current, dest)
+    (app_folder() / "database.path").write_text(str(dest), encoding="utf-8")
+    return dest
+
+
+def save_note(query: str, summary: str, url: str, database: Path | None = None) -> None:
+    with _connect(database) as conn:
+        conn.execute(
+            "INSERT INTO notes (query, summary, url, created_at) VALUES (?, ?, ?, ?)",
+            (query, summary, url, _now()),
+        )
 
 
 def history_budget() -> int:
@@ -85,6 +119,17 @@ def _connect(database: Path | None) -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS turns_model ON turns (model_path, id)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            url TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     return conn
 
 

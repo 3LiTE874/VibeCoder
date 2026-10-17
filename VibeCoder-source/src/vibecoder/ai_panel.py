@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from vibecoder.gguf_backend import GgufError, generate, validate_gguf
+from vibecoder.zira_memory import choose_database_folder, database_path
 from vibecoder.zira_tools import allowed_project
 
 _SETTINGS_KEY = "gguf/model_path"
@@ -31,15 +32,16 @@ class _GenerateThread(QThread):
     succeeded = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, path: str, prompt: str, project: str) -> None:
+    def __init__(self, path: str, prompt: str, project: str, online: bool) -> None:
         super().__init__()
         self._path = path
         self._prompt = prompt
         self._project = project
+        self._online = online
 
     def run(self) -> None:
         try:
-            self.succeeded.emit(generate(self._path, self._prompt, self._project))
+            self.succeeded.emit(generate(self._path, self._prompt, self._project, online=self._online))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -138,6 +140,20 @@ class AiPanel(QWidget):
         layout.addWidget(self.mode_btn)
         self._paint_mode()
 
+        self.db_label = QLabel()
+        self.db_label.setWordWrap(True)
+        self.db_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.db_label.setStyleSheet("color: #969696; font-size: 10px;")
+        layout.addWidget(self.db_label)
+        self.db_btn = QPushButton("Choose backup folder")
+        self.db_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.db_btn.setStyleSheet("QPushButton { font-size: 10px; padding: 1px 8px; min-height: 16px; }")
+        self.db_btn.clicked.connect(self._choose_database)
+        layout.addWidget(self.db_btn)
+        self._show_database()
+
         self.response = QTextEdit()
         self.response.setReadOnly(True)
         self.response.setTextInteractionFlags(
@@ -188,25 +204,28 @@ class AiPanel(QWidget):
         self._paint_mode()
         self._show_model_note()
         if self._mode == _OFFLINE:
-            self.response.setPlainText("OFFLINE. Suggestions come from the GGUF on this PC.")
+            self.response.setPlainText(
+                "OFFLINE. Nothing is sent off this PC. Her notes stay in the database file below."
+            )
         else:
             self.response.setPlainText(
-                "ONLINE is selected. No online service is connected, so nothing is sent off this PC. "
-                "Click the button to return OFFLINE and use your GGUF."
+                "ONLINE. She still answers from the model on this PC. "
+                "She may read one public web page when a reference is not in your PDFs, and that note is saved in the database file below. "
+                "The open file is not uploaded."
             )
 
     def _paint_mode(self) -> None:
         if self._mode == _OFFLINE:
             self.mode_btn.setText("OFFLINE")
             self.mode_btn.setStyleSheet(
-                "background-color: #17361c; color: #39ff14; font-weight: 700; "
-                "font-size: 14px; padding: 8px 14px; border: 1px solid #39ff14;"
+                "background-color: #3c1414; color: #ff4d4d; font-weight: 700; "
+                "font-size: 14px; padding: 8px 14px; border: 1px solid #ff4d4d;"
             )
         else:
             self.mode_btn.setText("ONLINE")
             self.mode_btn.setStyleSheet(
-                "background-color: #0e639c; color: #ffffff; font-weight: 700; "
-                "font-size: 14px; padding: 8px 14px; border: 1px solid #1177bb;"
+                "background-color: #17361c; color: #39ff14; font-weight: 700; "
+                "font-size: 14px; padding: 8px 14px; border: 1px solid #39ff14;"
             )
 
     def _add_model(self) -> None:
@@ -239,12 +258,6 @@ class AiPanel(QWidget):
         if not prompt:
             self.response.setPlainText("Enter a prompt first.")
             return
-        if self._mode == _ONLINE:
-            self.response.setPlainText(
-                "ONLINE is selected, and no online service is connected. "
-                "Nothing was sent. Switch to OFFLINE to run the GGUF on this PC."
-            )
-            return
         if not self._model_path:
             self.response.setPlainText("Use Get Model and choose a .gguf file first.")
             return
@@ -255,7 +268,7 @@ class AiPanel(QWidget):
         self.add_model_btn.setEnabled(False)
         self.mode_btn.setEnabled(False)
         self.model_note.setText("Zira is working…")
-        self._worker = _GenerateThread(self._model_path, prompt, self._project)
+        self._worker = _GenerateThread(self._model_path, prompt, self._project, self._mode == _ONLINE)
         self._worker.succeeded.connect(self._on_success)
         self._worker.failed.connect(self._on_failure)
         self._worker.start()
@@ -281,6 +294,19 @@ class AiPanel(QWidget):
             return
         QGuiApplication.clipboard().setText(text)
         self.model_note.setText("Reply copied.")
+
+    def _choose_database(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Choose Zira's backup folder", str(database_path().parent))
+        if not folder:
+            return
+        path = choose_database_folder(folder)
+        self._show_database()
+        self.response.setPlainText(
+            "Her database is now this file. Copy it when you move to another computer:\n" + str(path)
+        )
+
+    def _show_database(self) -> None:
+        self.db_label.setText("Database:\n" + str(database_path()))
 
     def set_project(self, path: str) -> None:
         self._project = allowed_project(path)

@@ -15,9 +15,15 @@ class ToolError(RuntimeError):
     pass
 
 
-def run_tool(call: dict, project: str) -> str:
+def run_tool(call: dict, project: str, online: bool = False) -> str:
     name = call.get("name", "")
     try:
+        if name == "web_lookup":
+            if not online:
+                return "OFFLINE. That lookup was not sent."
+            from vibecoder.zira_online import lookup_web
+
+            return lookup_web(call.get("path", ""))
         if name == "list_dir":
             return _list_dir(_readable(call["path"], project))
         if name == "read_file":

@@ -607,11 +607,11 @@ class MainWindow(QMainWindow):
             )
             return
         found = check_python(editor.text())
+        editor.set_diagnostics(found)
         if not found:
             self._output.append("No Python syntax errors.")
             return
         diag = found[0]
-        editor.mark_error(diag.line, diag.column)
         editor.setCursorPosition(diag.line, diag.column)
         editor.ensureLineVisible(diag.line)
         self._output.append(f"Line {diag.line + 1}: {diag.message}")
