@@ -1,2 +1,16 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Keep text as LF in the repository and in the working tree.
+# eol=lf stops Git for Windows from planning a CRLF rewrite on the next checkout.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.gguf binary
+*.exe binary
+*.dll binary
+*.pyc binary
+*.zip binary
+*.whl binary

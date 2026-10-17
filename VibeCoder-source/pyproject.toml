@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibecoder"
+version = "0.1.0"
+description = "Notepad++-style dark editor with persistent syntax highlighting and AI vibe coding"
+readme = "README.md"
+license = { text = "GPL-3.0-only" }
+requires-python = ">=3.10"
+authors = [{ name = "Christopher LePage" }]
+dependencies = [
+    "PyQt6>=6.6.0",
+    "PyQt6-QScintilla>=2.14.0",
+    "llama-cpp-python>=0.3.35",
+]
+
+[project.scripts]
+vibecoder = "vibecoder.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
