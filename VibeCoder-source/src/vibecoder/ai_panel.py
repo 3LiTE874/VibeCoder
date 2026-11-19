@@ -308,6 +308,11 @@ class AiPanel(QWidget):
     def _show_database(self) -> None:
         self.db_label.setText("Database:\n" + str(database_path()))
 
+    def prime(self, text: str) -> None:
+        """Put a prompt in the box. The person still chooses when to send it."""
+        self.prompt.setPlainText(text)
+        self.prompt.setFocus()
+
     def set_project(self, path: str) -> None:
         self._project = allowed_project(path)
 
