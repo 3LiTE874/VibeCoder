@@ -9,10 +9,12 @@ from PyQt6.QtWidgets import QMenu, QWidget
 
 from vibecoder.diagnostics import Diagnostic, check_python
 from vibecoder.languages import create_lexer, label_for_language
+from vibecoder.refs import reference_hits
 from vibecoder.themes import style_editor
 
 _ERROR_INDICATOR = 20
 _WARNING_INDICATOR = 21
+_REF_INDICATOR = 22
 _ERROR_MARKER = 8
 _WARNING_MARKER = 9
 _BREAKPOINT_MARKER = 10
@@ -70,7 +72,12 @@ class OverviewRuler(QWidget):
         painter.setPen(QColor(186, 186, 186, 140))
         painter.drawRect(0, top, self.width() - 1, max(1, box - 1))
         for line, kind in self._marks:
-            color = QColor("#cca700") if kind == "warning" else QColor("#f14c4c")
+            if kind == "ref":
+                color = QColor("#4fc1ff")
+            elif kind == "warning":
+                color = QColor("#cca700")
+            else:
+                color = QColor("#f14c4c")
             y = int(max(0, line) * line_h)
             painter.fillRect(0, y, self.width(), 2, color)
         painter.end()
@@ -121,6 +128,7 @@ class EditorWidget(QsciScintilla):
     explain_requested = pyqtSignal()
     check_requested = pyqtSignal()
     diagnostics_changed = pyqtSignal()
+    refs_changed = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -128,6 +136,7 @@ class EditorWidget(QsciScintilla):
         self._hover_point = QPoint()
         self._diagnostics: list[Diagnostic] = []
         self._breakpoints: set[int] = set()
+        self._reference_lines: list[int] = []
         self._dwell = QTimer(self)
         self._dwell.setSingleShot(True)
         self._dwell.setInterval(750)
@@ -137,6 +146,13 @@ class EditorWidget(QsciScintilla):
         self._check_timer.setInterval(350)
         self._check_timer.timeout.connect(self.recheck_diagnostics)
         self.textChanged.connect(self._check_timer.start)
+        self._ref_timer = QTimer(self)
+        self._ref_timer.setSingleShot(True)
+        self._ref_timer.setInterval(80)
+        self._ref_timer.timeout.connect(self._paint_refs)
+        self.textChanged.connect(self._ref_timer.start)
+        self.cursorPositionChanged.connect(lambda *_args: self._ref_timer.start())
+        self.selectionChanged.connect(self._ref_timer.start)
         self.marginClicked.connect(self._margin_clicked)
         style_editor(self)
         self._configure_editor()
@@ -170,6 +186,8 @@ class EditorWidget(QsciScintilla):
         self.SendScintilla(QsciScintilla.SCI_INDICSETFORE, _ERROR_INDICATOR, 0x00474CF1)
         self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE, _WARNING_INDICATOR, QsciScintilla.INDIC_SQUIGGLE)
         self.SendScintilla(QsciScintilla.SCI_INDICSETFORE, _WARNING_INDICATOR, 0x0000A7CC)
+        self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE, _REF_INDICATOR, QsciScintilla.INDIC_TEXTFORE)
+        self.SendScintilla(QsciScintilla.SCI_INDICSETFORE, _REF_INDICATOR, 0x00FFC14F)
 
     @property
     def language_id(self) -> str:
@@ -199,6 +217,7 @@ class EditorWidget(QsciScintilla):
         self.setCursorPosition(line, index)
         self.setFirstVisibleLine(first_visible)
         self.recheck_diagnostics()
+        self._paint_refs()
 
     def replace_text(self, new_text: str) -> None:
         """Replace buffer content while preserving lexer and theme."""
@@ -220,6 +239,10 @@ class EditorWidget(QsciScintilla):
     @property
     def breakpoints(self) -> set[int]:
         return set(self._breakpoints)
+
+    @property
+    def reference_lines(self) -> list[int]:
+        return list(self._reference_lines)
 
     def clear_diagnostics(self) -> None:
         self._diagnostics = []
@@ -308,6 +331,29 @@ class EditorWidget(QsciScintilla):
             return ""
         raw = self.text().encode("utf-8")
         return raw[start:end].decode("utf-8", errors="ignore").strip()
+
+    def _ref_word(self) -> str:
+        selected = self.selected_text_value().strip()
+        if selected:
+            if any(char.isspace() for char in selected):
+                return ""
+            return selected
+        return self.word_under_cursor()
+
+    def _paint_refs(self) -> None:
+        length = int(self.SendScintilla(QsciScintilla.SCI_GETTEXTLENGTH))
+        self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, _REF_INDICATOR)
+        self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE, 0, max(0, length))
+        hits = reference_hits(self.text(), self._ref_word())
+        lines = sorted({line for _start, _size, line in hits}) if len(hits) >= 2 else []
+        if len(hits) >= 2:
+            for start, size, _line in hits:
+                self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, _REF_INDICATOR)
+                self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE, start, size)
+        if lines == self._reference_lines:
+            return
+        self._reference_lines = lines
+        self.refs_changed.emit()
 
     def _margin_clicked(self, margin: int, line: int, _modifiers) -> None:
         if margin == _BREAKPOINT_MARGIN:

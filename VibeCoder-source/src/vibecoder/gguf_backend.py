@@ -9,6 +9,7 @@ import sys
 import threading
 from pathlib import Path
 
+from vibecoder.zira_asa import begin_turn, close_turn, note_step, unfinished_note
 from vibecoder.zira_memory import REPLY_TOKENS, latest_trace, record_turn
 from vibecoder.zira_tools import run_tool
 
@@ -81,7 +82,7 @@ def generate(path: str, prompt: str, project: str = "", online: bool = False) ->
             )
             _loaded_path = str(file_path)
         trace, cleared = latest_trace(str(file_path), extra_user=prompt)
-        reply = _complete(_model, trace, cleared, project, online)
+        reply = _complete(_model, trace, cleared, project, online, prompt)
         record_turn(str(file_path), "user", prompt)
         record_turn(str(file_path), "assistant", reply)
         return reply
@@ -102,7 +103,7 @@ def _spoken_reply(text: str) -> str:
     cleaned = _HAN.sub("", cleaned)
     kept: list[str] = []
     seen: set[str] = set()
-    for line in cleaned.splitlines():
+    for line in _PROTOCOL_LINE.sub("", cleaned).splitlines():
         line = " ".join(line.split())
         if not line:
             continue
@@ -117,59 +118,112 @@ def _spoken_reply(text: str) -> str:
     return spoken
 
 
-_LINE_TOOL = re.compile(
-    r"^TOOL\s+(list_dir|read_file|make_dir|web_lookup)\s+(.+?)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-_COPY_TOOL = re.compile(
-    r"^TOOL\s+copy_file\s+(.+?)\s+=>\s+(.+?)\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-_WRITE_TOOL = re.compile(
-    r"TOOL\s+write_file\s+(.+?)\s*\n(.*?)ENDTOOL",
+_BLOCK_TOOL = re.compile(
+    r"TOOL\s+(write_file|append_file)\s+(.+?)\s*\n(.*?)ENDTOOL",
     re.IGNORECASE | re.DOTALL,
 )
+_REPLACE_TOOL = re.compile(
+    r"TOOL\s+replace_text\s+(.+?)\s*\n(.*?)ENDOLD\s*\n(.*?)ENDTOOL",
+    re.IGNORECASE | re.DOTALL,
+)
+_ANY_TOOL = re.compile(
+    r"^TOOL\s+([A-Za-z_][\w-]*)\s*(.*?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PROTOCOL_LINE = re.compile(r"(?im)^[ \t]*(?:TOOL\b.*|ENDTOOL\s*|ENDOLD\s*)[ \t]*$")
 _INVENTED = re.compile(
     r"quantum|self-replicat|executable matrix|cosmic|mainframe|neural kernel|autonomous compilation|compiler farm",
     re.IGNORECASE,
 )
-_MAX_TOOLS = 4
+_MAX_TOOLS = 6
+_RESULT_CLIP = 700
 
 
 def parse_tool(text: str) -> dict | None:
     """Return the first tool request in a reply, including one hidden in private thoughts."""
     found: list[tuple[int, dict]] = []
-    for match in _LINE_TOOL.finditer(text):
-        found.append((match.start(), {"name": match.group(1).lower(), "path": _unquote(match.group(2))}))
-    for match in _COPY_TOOL.finditer(text):
-        found.append(
-            (
-                match.start(),
-                {"name": "copy_file", "source": _unquote(match.group(1)), "dest": _unquote(match.group(2))},
-            )
-        )
-    for match in _WRITE_TOOL.finditer(text):
+    covered: list[tuple[int, int]] = []
+    for match in _REPLACE_TOOL.finditer(text):
+        covered.append((match.start(), match.end()))
         found.append(
             (
                 match.start(),
                 {
-                    "name": "write_file",
+                    "name": "replace_text",
                     "path": _unquote(match.group(1).strip()),
-                    "content": match.group(2).strip("\n"),
+                    "old": match.group(2).strip("\n"),
+                    "new": match.group(3).strip("\n"),
                 },
             )
         )
+    for match in _BLOCK_TOOL.finditer(text):
+        if _inside(match.start(), covered):
+            continue
+        covered.append((match.start(), match.end()))
+        found.append(
+            (
+                match.start(),
+                {
+                    "name": match.group(1).lower(),
+                    "path": _unquote(match.group(2).strip()),
+                    "content": match.group(3).strip("\n"),
+                },
+            )
+        )
+    for match in _ANY_TOOL.finditer(text):
+        if _inside(match.start(), covered):
+            continue
+        found.append((match.start(), _line_call(match.group(1).lower(), match.group(2).strip())))
     if not found:
         return None
     found.sort(key=lambda item: item[0])
     return found[0][1]
 
 
+def _inside(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= pos < end for start, end in spans)
+
+
+def _line_call(name: str, rest: str) -> dict:
+    if name == "copy_file" and "=>" in rest:
+        source, dest = rest.split("=>", 1)
+        return {"name": name, "source": _unquote(source), "dest": _unquote(dest)}
+    if name == "read_file":
+        path, line = _split_line(rest)
+        call = {"name": name, "path": path}
+        if line:
+            call["line"] = line
+        return call
+    if name == "search_text":
+        if "::" in rest:
+            folder, query = rest.split("::", 1)
+            return {"name": name, "path": _unquote(folder), "query": query.strip()}
+        return {"name": name, "path": "", "query": rest}
+    if name in {"write_file", "append_file", "replace_text"}:
+        return {"name": name, "path": _unquote(rest)}
+    return {"name": name, "path": _unquote(rest)}
+
+
+def _split_line(rest: str) -> tuple[str, int]:
+    match = re.search(r"\s@\s+(\d+)\s*$", rest)
+    if not match:
+        return _unquote(rest), 0
+    return _unquote(rest[: match.start()]), int(match.group(1))
+
+
+def bare_protocol(text: str) -> bool:
+    """True when the reply is only tool markup, which is not an answer."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(line.upper() in {"ENDTOOL", "ENDOLD"} or line.upper().startswith("TOOL ") for line in lines)
+
+
 def _unquote(path: str) -> str:
     return path.strip().strip('"').strip("'")
 
 
-def _system_prompt(project: str, cleared: bool, online: bool = False) -> str:
+def _system_prompt(project: str, cleared: bool, online: bool = False, pending: str = "") -> str:
     folder = project if project else "none — use Open Folder"
     text = (
         "You are Zira 1.0, the offline assistant inside VibeCoder, a local Windows text editor, daughter number 4. "
@@ -177,20 +231,35 @@ def _system_prompt(project: str, cleared: bool, online: bool = False) -> str:
         "Earlier talk of quantum systems, matrices, or self-replicating compilers was wrong. Do not continue it. "
         "Never invent files, folders, or features. If a tool has not returned it, you do not know it. "
         f"Open project: {folder}. "
-        "You may list and read the project, Desktop, Downloads, and Documents. "
-        "You may make folders, write new files, and copy files only into the open project. "
-        "You cannot delete files, overwrite files, or run programs. "
+        "You may list, read, and search the project, Desktop, Downloads, and Documents. "
+        "You may make folders, write new files, append, copy, and replace one exact piece of text only inside the open project. "
+        "You cannot delete files, rename files, replace a whole existing file, download files, or run programs. "
+        "If you cannot do something, say I can't do that and the reason in one sentence. "
+        "ENDTOOL only closes write_file, append_file, and replace_text. It is not a tool and it does not finish the job. "
         "To act, reply with one tool and no other text:\n"
         "TOOL list_dir PATH\n"
+        "TOOL search_text QUERY\n"
+        "TOOL search_text FOLDER :: QUERY\n"
         "TOOL read_file PATH\n"
+        "TOOL read_file PATH @ LINE\n"
         "TOOL make_dir PATH\n"
         "TOOL copy_file SOURCE => DEST\n"
         "TOOL write_file PATH\n"
         "file text here\n"
         "ENDTOOL\n"
+        "TOOL append_file PATH\n"
+        "text to add\n"
+        "ENDTOOL\n"
+        "TOOL replace_text PATH\n"
+        "old text\n"
+        "ENDOLD\n"
+        "new text\n"
+        "ENDTOOL\n"
         "When you answer the person, use plain English sentences and only facts from tool results. "
         "Do not use Chinese characters. Do not repeat a sentence. Do not narrate private reasoning."
     )
+    if pending:
+        text += " " + pending
     if online:
         text += (
             " ONLINE is on. For a public reference, reply with only TOOL web_lookup TOPIC. "
@@ -205,17 +274,57 @@ def _system_prompt(project: str, cleared: bool, online: bool = False) -> str:
     return text
 
 
-def _complete(model, trace: list[dict[str, str]], cleared: bool, project: str, online: bool = False) -> str:
-    messages: list[dict[str, str]] = [{"role": "system", "content": _system_prompt(project, cleared, online)}, *trace]
+def _complete(
+    model,
+    trace: list[dict[str, str]],
+    cleared: bool,
+    project: str,
+    online: bool = False,
+    goal: str = "",
+) -> str:
+    pending = unfinished_note()
+    job_id = begin_turn(goal or pending or "reply")
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": _system_prompt(project, cleared, online, pending)},
+        *trace,
+    ]
     notes: list[str] = []
     corrected = False
+    retried_protocol = False
+    refused = False
     for _ in range(_MAX_TOOLS + 1):
         try:
             raw = _chat(model, messages)
         except Exception as exc:
-            return _with_notes(notes, f"I could not continue: {exc}")
+            spoken = _room_or_error(exc)
+            close_turn(job_id, "blocked", spoken)
+            return _with_notes(notes, spoken)
         call = parse_tool(raw)
+        if call is not None and len(notes) >= _MAX_TOOLS:
+            spoken = (
+                "I used 6 tool calls and this turn is full. "
+                "Ask me to continue and I will keep going from the last result."
+            )
+            close_turn(job_id, "blocked", spoken)
+            return _with_notes(notes, spoken)
         if call is None:
+            if bare_protocol(raw) and not retried_protocol:
+                retried_protocol = True
+                messages.append({"role": "assistant", "content": raw})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "ENDTOOL is not a tool and does not finish the job. "
+                            "Use one real tool, or tell the person in one sentence that you can't do that."
+                        ),
+                    }
+                )
+                continue
+            if bare_protocol(raw):
+                spoken = "I can't do that. ENDTOOL only closes a file write. Tell me the file or the change."
+                close_turn(job_id, "blocked", spoken)
+                return _with_notes(notes, spoken)
             spoken = _spoken_reply(raw)
             if not corrected and not notes and spoken and _INVENTED.search(spoken):
                 corrected = True
@@ -232,29 +341,57 @@ def _complete(model, trace: list[dict[str, str]], cleared: bool, project: str, o
                 continue
             if not notes and spoken and _INVENTED.search(spoken):
                 spoken = "No tool was used, so this is not a look at your files.\n\n" + spoken
+            close_turn(job_id, "done", spoken, worked=bool(notes))
             return _with_notes(notes, spoken)
         result = run_tool(call, project, online=online)
-        notes.append(_note(call, result))
+        label = _note(call, result)
+        notes.append(label)
+        note_step(job_id, label)
         messages.append({"role": "assistant", "content": raw})
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Tool result:\n{result}\n\n"
-                    "Call another TOOL line if you still need a fact, or answer in plain sentences from these results only."
-                ),
-            }
-        )
-    return _with_notes(notes, "I stopped after 4 tool calls. Ask again if you want another look.")
+        if result.startswith("I can't do that"):
+            if refused:
+                close_turn(job_id, "blocked", result)
+                return _with_notes(notes, result)
+            refused = True
+            follow = (
+                f"Tool result:\n{result}\n\n"
+                "Tell the person that sentence. Do not invent another tool for the same action."
+            )
+        else:
+            follow = (
+                f"Tool result:\n{_clip(result)}\n\n"
+                "Call another TOOL line if you still need a fact, or answer in plain sentences from these results only."
+            )
+        messages.append({"role": "user", "content": follow})
+    spoken = "I used 6 tool calls and this turn is full. Ask me to continue and I will keep going from the last result."
+    close_turn(job_id, "blocked", spoken)
+    return _with_notes(notes, spoken)
+
+
+def _clip(result: str) -> str:
+    if len(result) <= _RESULT_CLIP:
+        return result
+    return result[:_RESULT_CLIP] + "\n…clipped. Read the next part if you still need it."
+
+
+def _room_or_error(exc: Exception) -> str:
+    text = str(exc).casefold()
+    if "context" in text or "n_ctx" in text or "token" in text:
+        return "I ran out of room in this turn. Ask me to continue and I will keep going from the last result."
+    return f"I could not continue: {exc}"
 
 
 def _note(call: dict, result: str) -> str:
     if call["name"] == "copy_file":
-        label = f"copy_file {call['source']} => {call['dest']}"
-    elif call["name"] == "write_file":
-        label = f"write_file {call['path']}"
+        label = f"copy_file {call.get('source', '')} => {call.get('dest', '')}"
+    elif call["name"] == "search_text":
+        label = f"search_text {call.get('query', '')}"
+    elif call["name"] in {"write_file", "append_file", "replace_text"}:
+        label = f"{call['name']} {call.get('path', '')}"
     else:
-        label = f"{call['name']} {call['path']}"
+        label = f"{call['name']} {call.get('path', '')}"
+        if call.get("line"):
+            label += f" @ {call['line']}"
     if call["name"] == "list_dir" and "\t" in result:
         count = sum(1 for line in result.splitlines() if "\t" in line)
         return f"{label} — {count} entries"

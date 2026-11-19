@@ -15,7 +15,7 @@ from pathlib import Path
 
 CONTEXT_TOKENS = 2048
 REPLY_TOKENS = 512
-_SYSTEM_RESERVE = 480
+_SYSTEM_RESERVE = 640
 
 
 def app_folder() -> Path:
@@ -130,7 +130,23 @@ def _connect(database: Path | None) -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS asa_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     return conn
+
+
+def connect(database: Path | None = None) -> sqlite3.Connection:
+    """Zira's own database. Callers close it."""
+    return _connect(database)
 
 
 def _now() -> str:

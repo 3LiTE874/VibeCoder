@@ -128,8 +128,8 @@ class AiPanel(QWidget):
         layout.addLayout(header)
 
         hint = QLabel(
-            "She can look at the open project, Desktop, Downloads, and Documents. "
-            "She creates files only in the open project."
+            "She can look through the open project, Desktop, Downloads, and Documents, and search them. "
+            "She creates and edits files only in the open project. If she cannot do something, she says so."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #969696; font-size: 11px;")
