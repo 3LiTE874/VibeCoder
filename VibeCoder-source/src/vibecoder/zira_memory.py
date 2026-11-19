@@ -141,7 +141,42 @@ def _connect(database: Path | None) -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS output_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            body TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     return conn
+
+
+def load_output(database: Path | None = None) -> str:
+    """The output window text. It stays until the person clears it."""
+    conn = _connect(database)
+    try:
+        row = conn.execute("SELECT body FROM output_state WHERE id = 1").fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else ""
+
+
+def save_output(body: str, database: Path | None = None) -> None:
+    """Remember the whole output window, with no length cap."""
+    conn = _connect(database)
+    try:
+        conn.execute(
+            """
+            INSERT INTO output_state (id, body, updated_at) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at
+            """,
+            (body, _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def connect(database: Path | None = None) -> sqlite3.Connection:

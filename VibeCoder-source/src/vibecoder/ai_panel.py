@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PyQt6.QtCore import QSettings, QThread, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen
+from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPen, QTextCursor
 from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from vibecoder.gguf_backend import GgufError, generate, validate_gguf
-from vibecoder.zira_memory import choose_database_folder, database_path
+from vibecoder.zira_memory import choose_database_folder, database_path, load_output, save_output
 from vibecoder.zira_tools import allowed_project
 
 _SETTINGS_KEY = "gguf/model_path"
@@ -162,15 +162,24 @@ class AiPanel(QWidget):
         self.response.setPlaceholderText("Zira's replies appear here.")
         layout.addWidget(self.response, stretch=1)
 
-        self.copy_btn = QPushButton("Copy reply")
+        self.copy_btn = QPushButton("Copy text")
         self.copy_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.copy_btn.setStyleSheet(
             "QPushButton { font-size: 10px; padding: 1px 8px; min-height: 16px; }"
         )
         self.copy_btn.clicked.connect(self._copy_reply)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.clear_btn.setStyleSheet(
+            "QPushButton { font-size: 10px; padding: 1px 8px; min-height: 16px; "
+            "background-color: #3c1414; color: #ffb4b4; }"
+            "QPushButton:hover { background-color: #5a1a1a; }"
+        )
+        self.clear_btn.clicked.connect(self._clear_output)
         copy_row = QHBoxLayout()
         copy_row.addStretch(1)
         copy_row.addWidget(self.copy_btn)
+        copy_row.addWidget(self.clear_btn)
         layout.addLayout(copy_row)
 
         self.model_note = QLabel("No GGUF model loaded")
@@ -197,6 +206,7 @@ class AiPanel(QWidget):
             self._remember_model(saved, quiet=True)
         else:
             self._show_model_note()
+        self._show_saved_output()
 
     def _toggle_mode(self) -> None:
         self._mode = _ONLINE if self._mode == _OFFLINE else _OFFLINE
@@ -204,11 +214,9 @@ class AiPanel(QWidget):
         self._paint_mode()
         self._show_model_note()
         if self._mode == _OFFLINE:
-            self.response.setPlainText(
-                "OFFLINE. Nothing is sent off this PC. Her notes stay in the database file below."
-            )
+            self._append_output("OFFLINE. Nothing is sent off this PC. Her notes stay in the database file below.")
         else:
-            self.response.setPlainText(
+            self._append_output(
                 "ONLINE. She still answers from the model on this PC. "
                 "She may read one public web page when a reference is not in your PDFs, and that note is saved in the database file below. "
                 "The open file is not uploaded."
@@ -245,21 +253,21 @@ class AiPanel(QWidget):
             self._model_path = ""
             self._show_model_note()
             if not quiet:
-                self.response.setPlainText(str(exc))
+                self._append_output(str(exc))
             return
         self._model_path = str(file_path)
         QSettings().setValue(_SETTINGS_KEY, self._model_path)
         self._show_model_note()
         if not quiet:
-            self.response.setPlainText(f"Loaded {file_path.name}. Ask for a suggestion when you are ready.")
+            self._append_output(f"Loaded {file_path.name}. Ask for a suggestion when you are ready.")
 
     def _on_generate(self) -> None:
         prompt = self.prompt.toPlainText().strip()
         if not prompt:
-            self.response.setPlainText("Enter a prompt first.")
+            self._append_output("Enter a prompt first.")
             return
         if not self._model_path:
-            self.response.setPlainText("Use Get Model and choose a .gguf file first.")
+            self._append_output("Use Get Model and choose a .gguf file first.")
             return
         if self._worker is not None and self._worker.isRunning():
             return
@@ -268,17 +276,18 @@ class AiPanel(QWidget):
         self.add_model_btn.setEnabled(False)
         self.mode_btn.setEnabled(False)
         self.model_note.setText("Zira is working…")
+        self._append_output(f"You:\n{prompt}")
         self._worker = _GenerateThread(self._model_path, prompt, self._project, self._mode == _ONLINE)
         self._worker.succeeded.connect(self._on_success)
         self._worker.failed.connect(self._on_failure)
         self._worker.start()
 
     def _on_success(self, text: str) -> None:
-        self.response.setPlainText(text or "The model returned an empty reply.")
+        self._append_output("Zira:\n" + (text or "The model returned an empty reply."))
         self._restore_buttons()
 
     def _on_failure(self, message: str) -> None:
-        self.response.setPlainText(message)
+        self._append_output("Zira:\n" + message)
         self._restore_buttons()
 
     def _restore_buttons(self) -> None:
@@ -287,6 +296,30 @@ class AiPanel(QWidget):
         self.add_model_btn.setEnabled(True)
         self.mode_btn.setEnabled(True)
         self._show_model_note()
+
+    def _append_output(self, text: str) -> None:
+        """Add to the window. Nothing already there is removed."""
+        block = text.strip()
+        if not block:
+            return
+        current = self.response.toPlainText()
+        merged = block if not current.strip() else current.rstrip() + "\n\n" + block
+        self.response.setPlainText(merged)
+        self.response.moveCursor(QTextCursor.MoveOperation.End)
+        self.response.ensureCursorVisible()
+        save_output(merged)
+
+    def _show_saved_output(self) -> None:
+        saved = load_output()
+        if not saved:
+            return
+        self.response.setPlainText(saved)
+        self.response.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _clear_output(self) -> None:
+        self.response.clear()
+        save_output("")
+        self.model_note.setText("Output cleared.")
 
     def _copy_reply(self) -> None:
         text = self.response.toPlainText()
@@ -301,9 +334,7 @@ class AiPanel(QWidget):
             return
         path = choose_database_folder(folder)
         self._show_database()
-        self.response.setPlainText(
-            "Her database is now this file. Copy it when you move to another computer:\n" + str(path)
-        )
+        self._append_output("Her database is now this file. Copy it when you move to another computer:\n" + str(path))
 
     def _show_database(self) -> None:
         self.db_label.setText("Database:\n" + str(database_path()))
