@@ -3,3 +3,4 @@ PyQt6-QScintilla>=2.14.0
 # Prebuilt CPU wheel. Install with:
 # pip install -r requirements.txt --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 llama-cpp-python>=0.3.35
+capstone>=5.0.0

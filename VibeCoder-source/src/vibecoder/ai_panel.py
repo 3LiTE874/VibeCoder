@@ -128,8 +128,8 @@ class AiPanel(QWidget):
         layout.addLayout(header)
 
         hint = QLabel(
-            "She can look at the open project, Desktop, Downloads, and Documents. "
-            "She creates files only in the open project."
+            "She can look through the open project, Desktop, Downloads, and Documents, and search them. "
+            "She creates and edits files only in the open project. If she cannot do something, she says so."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #969696; font-size: 11px;")
@@ -307,6 +307,11 @@ class AiPanel(QWidget):
 
     def _show_database(self) -> None:
         self.db_label.setText("Database:\n" + str(database_path()))
+
+    def prime(self, text: str) -> None:
+        """Put a prompt in the box. The person still chooses when to send it."""
+        self.prompt.setPlainText(text)
+        self.prompt.setFocus()
 
     def set_project(self, path: str) -> None:
         self._project = allowed_project(path)

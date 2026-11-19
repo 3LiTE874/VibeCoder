@@ -28,6 +28,7 @@ from vibecoder.files import TextOpenError, read_editor_text
 from vibecoder.session import load_session, save_session, tab_record
 from vibecoder.glossary import explain, lookup
 from vibecoder.languages import LANGUAGES, label_for_language
+from vibecoder.listing import ListingError, format_listing
 from vibecoder.output_panel import OutputPanel
 from vibecoder.runner import command_for
 from vibecoder.terminal_panel import TerminalPanel
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
         file_menu = menubar.addMenu("&File")
         file_menu.addAction(self._action("New", self._new_tab, QKeySequence.StandardKey.New))
         file_menu.addAction(self._action("Open…", self._open_file, QKeySequence.StandardKey.Open))
+        file_menu.addAction(self._action("Open Binary…", self._open_binary))
         file_menu.addAction(self._action("Save", self._save_file, QKeySequence.StandardKey.Save))
         file_menu.addAction(self._action("Save As…", self._save_file_as, QKeySequence("Ctrl+Shift+S")))
         file_menu.addSeparator()
@@ -206,6 +208,7 @@ class MainWindow(QMainWindow):
         self._hover_wiki_action.setChecked(True)
         view_menu.addAction(self._hover_wiki_action)
         view_menu.addAction(self._action("Explain selection", self._explain_selection, QKeySequence("Ctrl+Shift+W")))
+        view_menu.addAction(self._action("Ask Zira about this function", self._ask_zira_function))
         view_menu.addAction(self._action("Close Deep Wiki", self._close_wiki))
 
         # Language, grouped A–Z so the full list stays usable.
@@ -316,6 +319,27 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Open File")
         if path:
             self._open_path(path)
+
+    def _open_binary(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Binary",
+            "",
+            "Programs (*.exe *.dll);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            listing = format_listing(path)
+        except ListingError as exc:
+            self.statusBar().showMessage(str(exc), 6000)
+            return
+        tab = self._new_tab(content=listing)
+        tab.editor.set_language("assembly")
+        tab.editor.setReadOnly(True)
+        tab.mark_saved()
+        self._tabs.setTabText(self._tabs.currentIndex(), f"{Path(path).name}.lst")
+        self.statusBar().showMessage(f"Listed the entry function of {Path(path).name}", 5000)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._write_session()
@@ -637,6 +661,27 @@ class MainWindow(QMainWindow):
         if not note:
             return
         self._show_wiki(word, note)
+
+    def _ask_zira_function(self) -> None:
+        editor = self._current_editor()
+        if editor is None:
+            return
+        body = editor.selected_text_value().strip() or editor.text().strip()
+        if not body:
+            self.statusBar().showMessage("Open a function listing first.", 4000)
+            return
+        if len(body) > 4000:
+            body = body[:4000] + "\n…"
+        self._toggle_ai_action.setChecked(True)
+        self._ai_dock.show()
+        self._ai_dock.raise_()
+        self._ai_panel.prime(
+            "Explain this function in plain English. "
+            "The lines below are the decoded instructions. "
+            "Do not add instructions that are not written here.\n\n"
+            + body
+        )
+        self.statusBar().showMessage("The function is in Zira's box. Send it when you are ready.", 5000)
 
     def _explain_selection(self) -> None:
         editor = self._current_editor()

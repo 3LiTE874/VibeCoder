@@ -18,6 +18,7 @@ class EditorTab(QWidget):
         self.editor = EditorWidget(self)
         self.editor.textChanged.connect(self._on_text_changed)
         self.editor.diagnostics_changed.connect(self._sync_ruler)
+        self.editor.refs_changed.connect(self._sync_ruler)
         self.editor.textChanged.connect(self._sync_source)
         self.editor.verticalScrollBar().valueChanged.connect(self._sync_viewport)
         self.ruler = OverviewRuler(self)
@@ -70,10 +71,11 @@ class EditorTab(QWidget):
         self.ruler.set_viewport(self.editor.firstVisibleLine(), max(1, visible))
 
     def _sync_ruler(self) -> None:
-        marks = [
+        marks = [(line, "ref") for line in self.editor.reference_lines]
+        marks.extend(
             (item.line, "warning" if item.replacement_line else "error")
             for item in self.editor.diagnostics
-        ]
+        )
         self.ruler.set_source(self.editor.text())
         self.ruler.set_marks(max(1, self.editor.lines()), marks)
         self._sync_viewport()
