@@ -5,8 +5,9 @@ from __future__ import annotations
 from PyQt6.Qsci import QsciScintilla
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
-from PyQt6.QtWidgets import QMenu, QWidget
+from PyQt6.QtWidgets import QColorDialog, QMenu, QToolTip, QWidget
 
+from vibecoder.color_preview import ColorMark, find_colors, recolor
 from vibecoder.diagnostics import Diagnostic, check_python
 from vibecoder.languages import create_lexer, label_for_language
 from vibecoder.refs import reference_hits
@@ -15,6 +16,7 @@ from vibecoder.themes import style_editor
 _ERROR_INDICATOR = 20
 _WARNING_INDICATOR = 21
 _REF_INDICATOR = 22
+_COLOR_INDICATORS = tuple(number for number in range(8, 35) if number not in {20, 21, 22})
 _ERROR_MARKER = 8
 _WARNING_MARKER = 9
 _BREAKPOINT_MARKER = 10
@@ -153,6 +155,13 @@ class EditorWidget(QsciScintilla):
         self.textChanged.connect(self._ref_timer.start)
         self.cursorPositionChanged.connect(lambda *_args: self._ref_timer.start())
         self.selectionChanged.connect(self._ref_timer.start)
+        self._color_timer = QTimer(self)
+        self._color_timer.setSingleShot(True)
+        self._color_timer.setInterval(80)
+        self._color_timer.timeout.connect(self._sync_color_preview)
+        self.textChanged.connect(self._color_timer.start)
+        self._color_marks: list[ColorMark] = []
+        self._syncing_colors = False
         self.marginClicked.connect(self._margin_clicked)
         style_editor(self)
         self._configure_editor()
@@ -218,6 +227,7 @@ class EditorWidget(QsciScintilla):
         self.setFirstVisibleLine(first_visible)
         self.recheck_diagnostics()
         self._paint_refs()
+        self._color_timer.start()
 
     def replace_text(self, new_text: str) -> None:
         """Replace buffer content while preserving lexer and theme."""
@@ -302,11 +312,90 @@ class EditorWidget(QsciScintilla):
         self.replaceSelectedText(new_text)
 
     def eventFilter(self, obj, event):  # noqa: N802
-        if event.type() == QEvent.Type.MouseMove and obj is self.viewport():
+        if obj is self.viewport():
             point = event.position().toPoint() if hasattr(event, "position") else event.pos()
-            self._hover_point = point
-            self._dwell.start()
+            if event.type() == QEvent.Type.MouseMove:
+                self._hover_point = point
+                self._dwell.start()
+                mark = self._mark_at_point(point)
+                if mark is None:
+                    QToolTip.hideText()
+                else:
+                    QToolTip.showText(event.globalPosition().toPoint(), "Click to change this color", self)
+            elif event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                mark = self._mark_at_point(point)
+                if mark is not None and not self.isReadOnly():
+                    self._pick_color(mark)
+                    return True
         return super().eventFilter(obj, event)
+
+    def _sync_color_preview(self) -> None:
+        if self._syncing_colors:
+            return
+        self._syncing_colors = True
+        try:
+            self._paint_color_preview()
+        finally:
+            self._syncing_colors = False
+
+    def _paint_color_preview(self) -> None:
+        length = int(self.SendScintilla(QsciScintilla.SCI_GETTEXTLENGTH))
+        for indicator in _COLOR_INDICATORS:
+            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, indicator)
+            self.SendScintilla(QsciScintilla.SCI_INDICATORCLEARRANGE, 0, max(0, length))
+        named = self._language_id in {"html", "css"}
+        marks = find_colors(self.text(), named=named)
+        self._color_marks = marks
+        slots: dict[tuple[int, int, int, int], int] = {}
+        for mark in marks:
+            key = (mark.red, mark.green, mark.blue, mark.alpha)
+            indicator = slots.get(key)
+            if indicator is None:
+                if len(slots) >= len(_COLOR_INDICATORS):
+                    continue
+                indicator = _COLOR_INDICATORS[len(slots)]
+                slots[key] = indicator
+                bgr = (mark.blue << 16) | (mark.green << 8) | mark.red
+                self.SendScintilla(QsciScintilla.SCI_INDICSETSTYLE, indicator, QsciScintilla.INDIC_STRAIGHTBOX)
+                self.SendScintilla(QsciScintilla.SCI_INDICSETFORE, indicator, bgr)
+                self.SendScintilla(QsciScintilla.SCI_INDICSETALPHA, indicator, 150)
+                self.SendScintilla(QsciScintilla.SCI_INDICSETUNDER, indicator, 1)
+            self.SendScintilla(QsciScintilla.SCI_SETINDICATORCURRENT, indicator)
+            self.SendScintilla(QsciScintilla.SCI_INDICATORFILLRANGE, mark.start, mark.length)
+
+    def _mark_at_point(self, point: QPoint) -> ColorMark | None:
+        pos = int(
+            self.SendScintilla(
+                QsciScintilla.SCI_POSITIONFROMPOINTCLOSE,
+                int(point.x()),
+                int(point.y()),
+            )
+        )
+        if pos < 0:
+            return None
+        for mark in self._color_marks:
+            if mark.start <= pos < mark.start + mark.length:
+                return mark
+        return None
+
+    def _pick_color(self, mark: ColorMark) -> None:
+        current = QColor(mark.red, mark.green, mark.blue, mark.alpha)
+        chosen = QColorDialog.getColor(
+            current,
+            self,
+            "Color preview",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
+        if not chosen.isValid():
+            return
+        self._apply_color(mark, chosen)
+
+    def _apply_color(self, mark: ColorMark, color: QColor) -> None:
+        replacement = recolor(mark, color.red(), color.green(), color.blue(), color.alpha())
+        line, index = self.lineIndexFromPosition(mark.start)
+        end_line, end_index = self.lineIndexFromPosition(mark.start + mark.length)
+        self.setSelection(line, index, end_line, end_index)
+        self.replaceSelectedText(replacement)
 
     def _emit_hover_word(self) -> None:
         if self.selected_text_value().strip():
